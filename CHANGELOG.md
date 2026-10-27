@@ -29,6 +29,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Keycloak 26.8.1 as the pinned default. Dokku 0.36.0 is the minimum.
 - Test suites (bats) and a GitHub Actions workflow running them against
   Dokku in Docker.
+- `keycloak:providers:add`, `providers:list` and `providers:remove` manage
+  Keycloak extension jars per instance. A jar is installed only when it
+  matches the given SHA-256 (https URLs or local paths), is built into the
+  image, and survives plugin updates and `keycloak:upgrade`. A jar that
+  breaks the build or the readiness check is removed again. Instances
+  rebuild once on their next restart after updating the plugin, because the
+  image definition changed.
 
 ### Fixed
 

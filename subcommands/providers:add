@@ -1,0 +1,101 @@
+#!/usr/bin/env bash
+source "$(dirname "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)")/functions"
+set -eo pipefail
+[[ $DOKKU_TRACE ]] && set -x
+
+cmd-keycloak-providers-add() {
+  declare desc="installs a Keycloak extension jar and rebuilds the instance"
+  declare cmd="keycloak:providers:add"
+  [[ "$1" == "$cmd" ]] && shift 1
+  declare APP="" SOURCE="" SHA256="" NO_RESTART=false
+  local name dir tmp actual
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --sha256)
+        [[ -n "$2" ]] || dokku_log_fail "--sha256 requires a value"
+        SHA256="$2"
+        shift 2
+        ;;
+      --no-restart)
+        NO_RESTART=true
+        shift
+        ;;
+      -*) dokku_log_fail "Unknown flag: $1" ;;
+      *)
+        if [[ -z "$APP" ]]; then
+          APP="$1"
+        elif [[ -z "$SOURCE" ]]; then
+          SOURCE="$1"
+        else
+          dokku_log_fail "Unexpected argument: $1"
+        fi
+        shift
+        ;;
+    esac
+  done
+
+  verify_keycloak_name "$APP"
+  [[ -n "$SOURCE" ]] || dokku_log_fail "Please specify an https URL or a local path to the jar"
+  # An extension runs inside Keycloak with full access to every realm, so it
+  # is only installed when it matches a checksum published by its author.
+  [[ -n "$SHA256" ]] || dokku_log_fail "--sha256 is required: pass the SHA-256 checksum published with the jar"
+  SHA256="${SHA256,,}"
+  [[ "$SHA256" =~ ^[0-9a-f]{64}$ ]] || dokku_log_fail "Invalid --sha256: expected 64 hexadecimal characters"
+
+  case "$SOURCE" in
+    https://*) name="${SOURCE%%[?#]*}" ;;
+    *://*) dokku_log_fail "Only https URLs are allowed: $SOURCE" ;;
+    *)
+      [[ -f "$SOURCE" && -r "$SOURCE" ]] || dokku_log_fail "No readable file at $SOURCE (it must be readable by the dokku user)"
+      name="$SOURCE"
+      ;;
+  esac
+  name="${name##*/}"
+  fn-keycloak-validate-provider-name "$name"
+
+  dir="$(fn-keycloak-providers-dir "$APP")"
+  if [[ -e "$dir/$name" ]]; then
+    actual="$(sha256sum <"$dir/$name" | cut -d' ' -f1)"
+    if [[ "$actual" == "$SHA256" ]]; then
+      dokku_log_info1 "$name is already installed in $APP"
+      return 0
+    fi
+    dokku_log_fail "A different $name is already installed in $APP. Remove it first with: dokku keycloak:providers:remove $APP $name"
+  fi
+
+  mkdir -p "$dir"
+  chmod 700 "$KEYCLOAK_DATA_ROOT/$APP" "$dir"
+  # Fetched next to its final place so the move is atomic, and hidden from
+  # builds (they take *.jar only) until it is verified.
+  tmp="$(mktemp "$dir/.add.XXXXXX")"
+  # shellcheck disable=SC2064 # the name is fixed now, on purpose
+  trap "rm -f '$tmp'" EXIT INT TERM
+
+  if [[ "$SOURCE" == https://* ]]; then
+    dokku_log_info1 "Downloading $name"
+    curl -fsSL --proto '=https' --proto-redir '=https' -o "$tmp" -- "$SOURCE" \
+      || dokku_log_fail "Download of $SOURCE failed. Nothing was installed"
+  else
+    cp -- "$SOURCE" "$tmp" || dokku_log_fail "Could not read $SOURCE. Nothing was installed"
+  fi
+
+  actual="$(sha256sum <"$tmp" | cut -d' ' -f1)"
+  [[ "$actual" == "$SHA256" ]] || dokku_log_fail "Checksum mismatch for $name: expected $SHA256, got $actual. Nothing was installed"
+  [[ "$(head -c 4 "$tmp" | od -An -tx1 | tr -d ' \n')" == "504b0304" ]] || dokku_log_fail "$name is not a jar file. Nothing was installed"
+
+  chmod 644 "$tmp"
+  mv -f "$tmp" "$dir/$name"
+  trap - EXIT INT TERM
+  dokku_log_info1 "Installed $name in $APP"
+
+  # A jar that breaks the build or the healthcheck would break every later
+  # restart, config change and upgrade too, so it does not stay installed.
+  # The running container is left as it was.
+  if ! (fn-keycloak-apply-config "$APP" "$NO_RESTART"); then
+    rm -f "$dir/$name"
+    dokku_log_fail "$APP could not be rebuilt with $name, so it was removed again. The running instance is unchanged"
+  fi
+}
+
+cmd-keycloak-providers-add "$@"

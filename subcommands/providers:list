@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+source "$(dirname "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)")/functions"
+set -eo pipefail
+[[ $DOKKU_TRACE ]] && set -x
+
+cmd-keycloak-providers-list() {
+  declare desc="lists the extension jars installed in a Keycloak instance"
+  declare cmd="keycloak:providers:list"
+  [[ "$1" == "$cmd" ]] && shift 1
+  declare APP="$1"
+  local jar found=false
+
+  verify_keycloak_name "$APP"
+
+  dokku_log_info2_quiet "$APP providers (name, bytes, sha256)"
+  while IFS= read -r jar; do
+    found=true
+    printf '%s %s %s\n' "${jar##*/}" "$(wc -c <"$jar" | tr -d ' ')" "$(sha256sum <"$jar" | cut -d' ' -f1)"
+  done < <(fn-keycloak-providers "$APP")
+  [[ "$found" == "true" ]] || dokku_log_verbose_quiet "No providers installed"
+  return 0
+}
+
+cmd-keycloak-providers-list "$@"

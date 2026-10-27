@@ -2,6 +2,45 @@
 
 load test_helper
 
+# Providers tests need an instance that exists. A stand-in with only the
+# plugin's version property passes verify_keycloak_name without deploying
+# anything; every command below runs with --no-restart.
+STANDIN="$TEST_APP-providers"
+
+plugin_fn() {
+  bash -c '
+    export PLUGIN_CORE_AVAILABLE_PATH="${PLUGIN_CORE_AVAILABLE_PATH:-/var/lib/dokku/core-plugins/available}"
+    export PLUGIN_ENABLED_PATH="${PLUGIN_ENABLED_PATH:-/var/lib/dokku/plugins/enabled}"
+    export DOKKU_LIB_ROOT="${DOKKU_LIB_ROOT:-/var/lib/dokku}"
+    source "$1/functions"
+    shift
+    "$@"
+  ' _ "$BATS_TEST_DIRNAME/.." "$@"
+}
+
+create_standin() {
+  plugin_fn fn-keycloak-set "$STANDIN" version 26.8.1
+  # the dokku user runs the commands and must be able to read the sources
+  SRC="$(mktemp -d /tmp/kc-providers.XXXXXX)"
+  chmod 755 "$SRC"
+  printf 'PK\003\004 not a real jar\n' >"$SRC/demo.jar"
+  chmod 644 "$SRC/demo.jar"
+}
+
+sha256_of() {
+  sha256sum "$1" | cut -d' ' -f1
+}
+
+providers_dir() {
+  plugin_fn fn-keycloak-providers-dir "$STANDIN"
+}
+
+teardown() {
+  [[ -n "$SRC" ]] || return 0
+  rm -rf "$SRC" "$(dirname "$(providers_dir)")"
+  plugin_fn fn-plugin-property-destroy keycloak "$STANDIN"
+}
+
 @test "(keycloak:help) lists the plugin" {
   run dokku keycloak:help
   assert_success
@@ -89,7 +128,7 @@ load test_helper
 
 @test "(lifecycle) every instance command rejects an unknown instance" {
   local subcommand
-  for subcommand in start stop restart logs destroy admin-credentials domains:set letsencrypt config:set config:get config:unset export import upgrade; do
+  for subcommand in start stop restart logs destroy admin-credentials domains:set letsencrypt config:set config:get config:unset export import upgrade providers:add providers:list providers:remove; do
     run dokku "keycloak:$subcommand" does-not-exist
     assert_failure
     assert_output_contains "Keycloak instance does-not-exist does not exist"
@@ -171,4 +210,121 @@ load test_helper
   assert_output_contains "found"
   # proves the stub really triggers the failure the helper avoids
   assert_output_contains "plain pipe fails too"
+}
+
+@test "(keycloak:providers:add) requires --sha256" {
+  create_standin
+  run dokku keycloak:providers:add "$STANDIN" "$SRC/demo.jar"
+  assert_failure
+  assert_output_contains "--sha256 is required"
+
+  run dokku keycloak:providers:add "$STANDIN" "$SRC/demo.jar" --sha256
+  assert_failure
+  assert_output_contains "--sha256 requires a value"
+
+  run dokku keycloak:providers:add "$STANDIN" "$SRC/demo.jar" --sha256 abc123
+  assert_failure
+  assert_output_contains "Invalid --sha256"
+}
+
+@test "(keycloak:providers:add) refuses anything but https URLs" {
+  create_standin
+  run dokku keycloak:providers:add "$STANDIN" http://example.com/demo.jar --sha256 "$(sha256_of "$SRC/demo.jar")" --no-restart
+  assert_failure
+  assert_output_contains "Only https URLs are allowed"
+
+  run dokku keycloak:providers:add "$STANDIN" ftp://example.com/demo.jar --sha256 "$(sha256_of "$SRC/demo.jar")" --no-restart
+  assert_failure
+  assert_output_contains "Only https URLs are allowed"
+}
+
+@test "(keycloak:providers:add) installs nothing when the checksum does not match" {
+  create_standin
+  run dokku keycloak:providers:add "$STANDIN" "$SRC/demo.jar" --sha256 "$(printf '0%.0s' {1..64})" --no-restart
+  assert_failure
+  assert_output_contains "Checksum mismatch"
+  assert_output_contains "Nothing was installed"
+
+  # no jar and no temporary file left behind
+  run ls -A "$(providers_dir)"
+  [[ -z "$output" ]]
+  run dokku keycloak:providers:list "$STANDIN"
+  assert_output_contains "No providers installed"
+}
+
+@test "(keycloak:providers:add) refuses a file that is not a jar" {
+  create_standin
+  echo "plain text" >"$SRC/text.jar"
+  chmod 644 "$SRC/text.jar"
+  run dokku keycloak:providers:add "$STANDIN" "$SRC/text.jar" --sha256 "$(sha256_of "$SRC/text.jar")" --no-restart
+  assert_failure
+  assert_output_contains "text.jar is not a jar file"
+
+  run ls -A "$(providers_dir)"
+  [[ -z "$output" ]]
+}
+
+@test "(keycloak:providers:add) refuses unsafe file names" {
+  create_standin
+  local name
+  for name in 'bad;name.jar' '.hidden.jar' 'demo.zip'; do
+    cp "$SRC/demo.jar" "$SRC/$name"
+    chmod 644 "$SRC/$name"
+    run dokku keycloak:providers:add "$STANDIN" "$SRC/$name" --sha256 "$(sha256_of "$SRC/demo.jar")" --no-restart
+    assert_failure
+    assert_output_contains "Invalid provider file name"
+  done
+
+  run dokku keycloak:providers:add "$STANDIN" "https://example.com/a%2F..%2Fb.jar" --sha256 "$(sha256_of "$SRC/demo.jar")" --no-restart
+  assert_failure
+  assert_output_contains "Invalid provider file name"
+}
+
+@test "(keycloak:providers:remove) fails for a jar that is not installed or has an unsafe name" {
+  create_standin
+  run dokku keycloak:providers:remove "$STANDIN" missing.jar --no-restart
+  assert_failure
+  assert_output_contains "Provider missing.jar is not installed in $STANDIN"
+
+  run dokku keycloak:providers:remove "$STANDIN" ../../etc/passwd.jar --no-restart
+  assert_failure
+  assert_output_contains "Invalid provider file name"
+
+  run dokku keycloak:providers:remove "$STANDIN"
+  assert_failure
+  assert_output_contains "Please specify the jar to remove"
+}
+
+@test "(keycloak:providers) add, list and remove a local jar without restarting" {
+  create_standin
+  local sum
+  sum="$(sha256_of "$SRC/demo.jar")"
+
+  run dokku keycloak:providers:add "$STANDIN" "$SRC/demo.jar" --sha256 "${sum^^}" --no-restart
+  assert_success
+  assert_output_contains "Installed demo.jar in $STANDIN"
+  assert_output_contains "Skipping restart"
+  run stat -c %a "$(providers_dir)/demo.jar"
+  [[ "$output" == "644" ]]
+
+  run dokku keycloak:providers:list "$STANDIN"
+  assert_success
+  assert_output_contains "demo.jar $(wc -c <"$SRC/demo.jar") $sum"
+
+  # the same jar again is a no-op, a different one under that name is refused
+  run dokku keycloak:providers:add "$STANDIN" "$SRC/demo.jar" --sha256 "$sum" --no-restart
+  assert_success
+  assert_output_contains "already installed"
+  mkdir -m 755 "$SRC/other"
+  printf 'PK\003\004 another build\n' >"$SRC/other/demo.jar"
+  chmod 644 "$SRC/other/demo.jar"
+  run dokku keycloak:providers:add "$STANDIN" "$SRC/other/demo.jar" --sha256 "$(sha256_of "$SRC/other/demo.jar")" --no-restart
+  assert_failure
+  assert_output_contains "A different demo.jar is already installed"
+
+  run dokku keycloak:providers:remove "$STANDIN" demo.jar --no-restart
+  assert_success
+  assert_output_contains "Removed demo.jar from $STANDIN"
+  run dokku keycloak:providers:list "$STANDIN"
+  assert_output_contains "No providers installed"
 }

@@ -37,6 +37,9 @@ fn-keycloak-help-content() {
     keycloak:info <name>, Show details about a Keycloak instance
     keycloak:letsencrypt <name> [--email <email>] [--force], Enable Let's Encrypt TLS (--force replaces a still-valid certificate)
     keycloak:list, List Keycloak instances
+    keycloak:providers:add <name> <https-url|path> --sha256 <hex> [--no-restart], Install an extension jar after verifying its checksum and rebuild
+    keycloak:providers:list <name>, List installed extension jars with their size and SHA-256
+    keycloak:providers:remove <name> <jar> [--no-restart], Remove an extension jar and rebuild
     keycloak:logs <name> [-t] [-n <lines>], Show the logs of a Keycloak instance
     keycloak:restart <name>, Restart an instance (rebuilding if build-time options changed)
     keycloak:upgrade <name> [--version <tag>] [--force], Back up the database and move an instance to another Keycloak release

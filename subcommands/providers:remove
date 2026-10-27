@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+source "$(dirname "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)")/functions"
+set -eo pipefail
+[[ $DOKKU_TRACE ]] && set -x
+
+cmd-keycloak-providers-remove() {
+  declare desc="removes an extension jar from a Keycloak instance and rebuilds it"
+  declare cmd="keycloak:providers:remove"
+  [[ "$1" == "$cmd" ]] && shift 1
+  declare APP="" NAME="" NO_RESTART=false
+  local arg jar
+
+  for arg in "$@"; do
+    case "$arg" in
+      --no-restart) NO_RESTART=true ;;
+      -*) dokku_log_fail "Unknown flag: $arg" ;;
+      *)
+        if [[ -z "$APP" ]]; then
+          APP="$arg"
+        elif [[ -z "$NAME" ]]; then
+          NAME="$arg"
+        else
+          dokku_log_fail "Unexpected argument: $arg"
+        fi
+        ;;
+    esac
+  done
+
+  verify_keycloak_name "$APP"
+  [[ -n "$NAME" ]] || dokku_log_fail "Please specify the jar to remove (see dokku keycloak:providers:list $APP)"
+  fn-keycloak-validate-provider-name "$NAME"
+  jar="$(fn-keycloak-providers-dir "$APP")/$NAME"
+  [[ -f "$jar" ]] || dokku_log_fail "Provider $NAME is not installed in $APP"
+
+  rm -f "$jar"
+  dokku_log_info1 "Removed $NAME from $APP"
+  if ! (fn-keycloak-apply-config "$APP" "$NO_RESTART"); then
+    dokku_log_fail "$APP could not be rebuilt without $NAME and still runs with it. Fix the cause, then run: dokku keycloak:restart $APP"
+  fi
+}
+
+cmd-keycloak-providers-remove "$@"

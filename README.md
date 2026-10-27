@@ -27,6 +27,7 @@ Maintained by [Shebang Labs](https://shebanglabs.io).
 - [Quick start](#quick-start)
 - [Command reference](#command-reference)
 - [Configuration](#configuration)
+- [Extensions (providers)](#extensions-providers)
 - [Backup and restore](#backup-and-restore)
 - [Upgrading](#upgrading)
 - [Troubleshooting](#troubleshooting)
@@ -53,6 +54,8 @@ Maintained by [Shebang Labs](https://shebanglabs.io).
   `/health/ready` before switching traffic.
 - **Config that knows Keycloak.** Runtime options cost a restart. Build-time
   options such as `KC_FEATURES` trigger a rebuild automatically.
+- **Extensions that stay installed.** Provider jars are checksum-verified,
+  built into the image and kept across plugin updates and Keycloak upgrades.
 - **Realm export and import** through Keycloak's own `kc.sh`, usable over ssh.
 - **Upgrades with a safety net.** The database is dumped before every upgrade,
   and downgrades are refused.
@@ -158,6 +161,9 @@ regular `dokku` command (`ps:report`, `logs`, `domains:report`,
 | `keycloak:export <name> [<realm>]` | Export one realm, or all, as JSON on stdout |
 | `keycloak:import <name> <file\|-> [--override]` | Import realms from a JSON export |
 | `keycloak:upgrade <name> [--version <tag>] [--force]` | Back up the database and move to another Keycloak release |
+| `keycloak:providers:add <name> <https-url\|path> --sha256 <hex> [--no-restart]` | Install an extension jar and rebuild |
+| `keycloak:providers:list <name>` | List installed extension jars with size and SHA-256 |
+| `keycloak:providers:remove <name> <jar> [--no-restart]` | Remove an extension jar and rebuild |
 
 `dokku keycloak:help` prints the same list.
 
@@ -284,6 +290,10 @@ dokku keycloak:upgrade auth --version 26.8.1   # to a specific release
 
 See [Upgrading](#upgrading).
 
+### `keycloak:providers:*`
+
+See [Extensions (providers)](#extensions-providers).
+
 ## Configuration
 
 ### Set by `keycloak:create`
@@ -341,6 +351,58 @@ sudo chown dokku:dokku /home/dokku/.dokkurc/keycloak
 | Variable | Default | Purpose |
 | -------- | ------- | ------- |
 | `KEYCLOAK_IMAGE_REPO` | `quay.io/keycloak/keycloak` | Use a mirror, for example on air-gapped hosts |
+
+## Extensions (providers)
+
+Some Keycloak extensions (SPIs such as event listeners, custom
+authenticators or admin endpoints) must be part of the image: Keycloak only
+loads jars that are in `/opt/keycloak/providers/` when `kc.sh build` runs.
+`keycloak:providers:add` installs a jar for one instance and rebuilds it.
+
+For example, the
+[SCIM outbound provisioning extension](https://github.com/shebang-labs/scim-outbound-for-keycloak):
+
+```sh
+dokku keycloak:providers:add auth \
+  https://github.com/shebang-labs/scim-outbound-for-keycloak/releases/download/v0.1.0/scim-outbound-for-keycloak-0.1.0.jar \
+  --sha256 cb920b0b01f2f449fc506fcbb85131e624f2d4e682f029ea7cd50f52d9e28f09
+dokku keycloak:providers:list auth
+```
+
+- `--sha256` is mandatory. An extension runs inside Keycloak with access to
+  every realm, so use the checksum its author publishes, not one you computed
+  from the download.
+- Only `https://` URLs are accepted, redirects included. On a host without
+  internet access, copy the jar there and pass its path instead of a URL. The
+  `dokku` user must be able to read it.
+- The jar is downloaded to a temporary file and installed only after the
+  checksum, the jar format and the file name
+  (`[A-Za-z0-9][A-Za-z0-9._-]*.jar`, taken from the URL or path) check out.
+  On any failure nothing is installed.
+- The instance is then rebuilt and deployed with the usual readiness check,
+  so the change is zero-downtime. If the build or the readiness check fails,
+  the jar is removed again and the running instance stays as it was.
+- Adding a jar that is already installed with the same checksum does
+  nothing. A different jar under the same name is refused: remove the old
+  one first.
+- `--no-restart` only installs the jar. The next `keycloak:restart` builds it
+  in.
+
+Jars are stored per instance in
+`/var/lib/dokku/data/keycloak/<name>/providers/`, outside the plugin, so they
+survive `dokku plugin:update` and are rebuilt into every new image,
+including the one `keycloak:upgrade` builds. Check that an extension supports
+the target Keycloak release before upgrading. `keycloak:destroy` deletes
+them.
+
+To roll an extension back, remove it. The instance is rebuilt without it:
+
+```sh
+dokku keycloak:providers:remove auth scim-outbound-for-keycloak-0.1.0.jar
+```
+
+Removing the jar does not remove data the extension wrote, such as its own
+database tables or realm settings.
 
 ## Backup and restore
 
@@ -413,6 +475,12 @@ sudo dokku plugin:update keycloak
 Updating the plugin does not touch running instances. Their version only
 changes when you run `keycloak:upgrade`.
 
+When an update changes the image definition, as the release that added
+[extensions](#extensions-providers) did, the next `keycloak:restart`, config
+change, provider change or upgrade of each instance rebuilds its image once.
+That rebuild is a zero-downtime deploy like any other. `keycloak:start`, a
+host reboot or Dokku's own `ps:restart` keep the existing image.
+
 ## Troubleshooting
 
 **`keycloak:create` takes a long time the first time.** The first build
@@ -484,8 +552,8 @@ database passwords, so do not share it unedited.
   password, build hash) lives in Dokku's property store under
   `/var/lib/dokku/config/keycloak/<name>/`, with mode `0600`.
 - The image is built from [`image/Dockerfile`](image/Dockerfile) in two
-  stages: `kc.sh build` with the instance's build-time options, then a clean
-  runtime image. A hash of the inputs decides whether a change needs a
+  stages: `kc.sh build` with the instance's build-time options and provider
+  jars, then a clean runtime image. A hash of the inputs decides whether a change needs a
   rebuild or only a restart.
 - The [entrypoint](image/docker-entrypoint.sh) turns `DATABASE_URL` into
   Keycloak's database settings when the container starts, so credentials never

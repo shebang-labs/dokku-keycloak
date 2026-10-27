@@ -20,6 +20,7 @@ cmd-keycloak-info() {
   fn-keycloak-info-row "Database" "$(fn-keycloak-get "$APP" database)"
   fn-keycloak-info-row "Network" "$(fn-keycloak-get "$APP" network)"
   fn-keycloak-info-row "Memory limit" "$(fn-keycloak-get "$APP" memory)"
+  fn-keycloak-info-row "Providers" "$(fn-keycloak-providers "$APP" | sed 's#.*/##' | paste -sd' ' -)"
   fn-keycloak-info-row "Hostname" "$(dokku config:get "$APP" KC_HOSTNAME || true)"
   fn-keycloak-info-row "URL" "$url"
   fn-keycloak-info-row "Admin console" "${url:+$url/admin/}"

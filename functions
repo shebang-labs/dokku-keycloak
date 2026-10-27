@@ -97,25 +97,56 @@ fn-keycloak-build-env() {
   done
 }
 
+fn-keycloak-providers-dir() {
+  declare desc="prints the directory holding an instance's extension jars"
+  declare APP="$1"
+  echo "$KEYCLOAK_DATA_ROOT/$APP/providers"
+}
+
+fn-keycloak-providers() {
+  declare desc="prints the paths of an instance's extension jars, sorted"
+  declare APP="$1"
+  local jar
+  for jar in "$(fn-keycloak-providers-dir "$APP")"/*.jar; do
+    [[ -f "$jar" ]] && echo "$jar"
+  done
+  return 0
+}
+
+fn-keycloak-validate-provider-name() {
+  declare desc="fails unless the name is a plain jar file name"
+  declare NAME="$1"
+  [[ "$NAME" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*\.jar$ ]] || dokku_log_fail "Invalid provider file name: $NAME (use letters, digits, dots, dashes and underscores, ending in .jar)"
+}
+
 fn-keycloak-build-hash() {
   declare desc="prints a hash of everything that goes into an instance's image"
   declare APP="$1"
+  local jar
   {
     echo "$KEYCLOAK_IMAGE_REPO:$(fn-keycloak-get "$APP" version)"
     fn-keycloak-build-env "$APP"
     cat "$KEYCLOAK_PLUGIN_ROOT/image/"*
+    # adds nothing without providers, so those instances keep their hash
+    while IFS= read -r jar; do
+      echo "provider ${jar##*/} $(sha256sum <"$jar" | cut -d' ' -f1)"
+    done < <(fn-keycloak-providers "$APP")
   } | sha256sum | cut -d' ' -f1
 }
 
 fn-keycloak-build-image() {
   declare desc="builds the optimized Keycloak image for an instance and tags it"
   declare APP="$1" TAG="$2"
-  local version context
+  local version context jar
 
   version="$(fn-keycloak-get "$APP" version)"
   context="$(mktemp -d)"
   cp "$KEYCLOAK_PLUGIN_ROOT/image/"* "$context/"
   fn-keycloak-build-env "$APP" >"$context/build.env"
+  mkdir "$context/providers"
+  while IFS= read -r jar; do
+    cp "$jar" "$context/providers/"
+  done < <(fn-keycloak-providers "$APP")
 
   dokku_log_info1 "Building Keycloak $version image"
   if ! "$DOCKER_BIN" image build --quiet --tag "$TAG" --build-arg "KEYCLOAK_IMAGE=$KEYCLOAK_IMAGE_REPO:$version" "$context" >/dev/null; then
@@ -180,9 +211,11 @@ fn-keycloak-apply() {
 }
 
 fn-keycloak-cleanup() {
-  declare desc="removes plugin state and build images for an instance"
+  declare desc="removes plugin state, extension jars and build images for an instance"
   declare APP="$1"
   fn-plugin-property-destroy "$KEYCLOAK_PLUGIN_NAME" "$APP"
+  # pre-upgrade backups next to it are kept on purpose
+  rm -rf "$(fn-keycloak-providers-dir "$APP")"
   fn-keycloak-prune-images "$APP" ""
 }
 

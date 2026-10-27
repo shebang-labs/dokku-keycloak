@@ -11,6 +11,10 @@ E2E_APP="${E2E_APP:-kc-e2e}"
 FROM_VERSION="${KEYCLOAK_E2E_FROM_VERSION:-26.8.0}"
 SMTP_HOST="${KEYCLOAK_TEST_SMTP_HOST:-172.17.0.1}"
 MAILPIT_API="${KEYCLOAK_TEST_MAILPIT_API:-http://127.0.0.1:8025}"
+# A real extension: Shebang Labs' SCIM provisioning provider.
+SCIM_JAR="scim-outbound-for-keycloak-0.1.0.jar"
+SCIM_URL="https://github.com/shebang-labs/scim-outbound-for-keycloak/releases/download/v0.1.0/$SCIM_JAR"
+SCIM_SHA256="cb920b0b01f2f449fc506fcbb85131e624f2d4e682f029ea7cd50f52d9e28f09"
 
 domain() {
   echo "$E2E_APP.$(hostname -I | awk '{print $1}' | tr . -).sslip.io"
@@ -20,6 +24,13 @@ domain() {
 # not depend on DNS.
 kc_curl() {
   curl -s --retry 10 --retry-all-errors --retry-delay 2 -H "Host: $(domain)" "$@"
+}
+
+# Newest web container first: during a deploy the old one is still retiring.
+web_providers() {
+  local container
+  container="$(docker ps -q --filter "label=com.dokku.app-name=$E2E_APP" --filter label=com.dokku.process-type=web | head -n1)"
+  docker exec "$container" ls /opt/keycloak/providers
 }
 
 admin_password() {
@@ -62,6 +73,16 @@ teardown_file() {
   assert_success
   assert_output_contains "Running:        true"
   assert_output_contains "Version:        $FROM_VERSION"
+}
+
+@test "(e2e) an instance without providers builds with none" {
+  run dokku keycloak:providers:list "$E2E_APP"
+  assert_success
+  assert_output_contains "No providers installed"
+
+  run web_providers
+  assert_success
+  refute_output_contains ".jar"
 }
 
 @test "(e2e) create never prints the database password" {
@@ -259,6 +280,31 @@ teardown_file() {
   [[ -n "$(admin_token)" ]]
 }
 
+@test "(e2e) providers:add builds a real extension into the image" {
+  run dokku keycloak:providers:add "$E2E_APP" "$SCIM_URL" --sha256 "$SCIM_SHA256"
+  assert_success
+  assert_output_contains "Installed $SCIM_JAR"
+
+  run web_providers
+  assert_output_contains "$SCIM_JAR"
+  run dokku keycloak:info "$E2E_APP"
+  assert_output_contains "Running:        true"
+  assert_output_contains "Providers:      $SCIM_JAR"
+  # Keycloak registered it, rather than just finding the file
+  run kc_admin GET /serverinfo
+  assert_output_contains '"scim-outbound"'
+
+  run dokku keycloak:providers:list "$E2E_APP"
+  assert_success
+  assert_output_contains "$SCIM_JAR $(stat -c %s "${DOKKU_LIB_ROOT:-/var/lib/dokku}/data/keycloak/$E2E_APP/providers/$SCIM_JAR") $SCIM_SHA256"
+
+  # adding it again changes nothing and does not redeploy
+  run dokku keycloak:providers:add "$E2E_APP" "$SCIM_URL" --sha256 "$SCIM_SHA256"
+  assert_success
+  assert_output_contains "already installed"
+  refute_output_contains "Building"
+}
+
 @test "(e2e) upgrade backs up the database and keeps realms" {
   run dokku keycloak:upgrade "$E2E_APP"
   assert_success
@@ -271,9 +317,27 @@ teardown_file() {
   run kc_curl -o /dev/null -w '%{http_code}' http://127.0.0.1/realms/e2e
   [[ "$output" == "200" ]]
 
+  # providers are rebuilt into the new release's image
+  run web_providers
+  assert_output_contains "$SCIM_JAR"
+
   run dokku keycloak:upgrade "$E2E_APP" --version "$FROM_VERSION"
   assert_failure
   assert_output_contains "Refusing to downgrade"
+}
+
+@test "(e2e) providers:remove rebuilds the instance without the extension" {
+  run dokku keycloak:providers:remove "$E2E_APP" "$SCIM_JAR"
+  assert_success
+  assert_output_contains "Removed $SCIM_JAR"
+
+  run web_providers
+  refute_output_contains "$SCIM_JAR"
+  run kc_admin GET /serverinfo
+  refute_output_contains '"scim-outbound"'
+  run dokku keycloak:providers:list "$E2E_APP"
+  assert_output_contains "No providers installed"
+  [[ -n "$(admin_token)" ]]
 }
 
 @test "(e2e) letsencrypt explains a missing email instead of requesting a certificate" {
@@ -294,6 +358,7 @@ teardown_file() {
   assert_failure
   run dokku network:exists "keycloak-$E2E_APP"
   assert_failure
+  [[ ! -e "${DOKKU_LIB_ROOT:-/var/lib/dokku}/data/keycloak/$E2E_APP/providers" ]]
   run dokku keycloak:list
   refute_output_contains "$E2E_APP"
 }
